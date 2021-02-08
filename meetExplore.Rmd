@@ -1,0 +1,639 @@
+---
+title: "hana Meet data exploration "
+resource_files:
+- inc/Meet_data.RData
+runtime: shiny
+output:
+  flexdashboard::flex_dashboard:
+    theme: readable
+    logo: inc/hana_logo_small.png
+    css: inc/corp-styles.css
+    includes:
+      before_body: 'inc/google-analytics.js'
+---
+
+```{r setup, include=FALSE}
+library(shiny)
+library(flexdashboard)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(stringr)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(here)
+library(rlang)
+library(RColorBrewer)  
+library(DT)
+library(lubridate)
+library(RiHana)
+
+
+load('inc/Meet_data.RData')
+
+hour_blocks<-get_week_hour_blocks()
+
+get_biz_days<-function(start_date,end_date){
+  
+df <- data.frame(date = seq(start_date, end_date, by = "days"))
+
+days <- df %>% 
+  mutate(day = wday(date,week_start=1)) %>%
+  filter(day<=5) %>%
+  nrow()
+
+days
+  
+}
+
+
+```
+
+```{r}
+
+updatedMeetData <- reactive({
+  meet_data <-meet_bookings_edited %>% 
+    filter(meeting_date>=input$MeetTimeRange[1],
+           meeting_date<=input$MeetTimeRange[2],
+           grepl(input$hanaLocation,hana_location,ignore.case = TRUE),
+           grepl(input$roomType,room_size,ignore.case = TRUE),
+           grepl(input$meetingRoom,name),
+           grepl(input$FirstBooking,booking_number),
+           grepl(input$InternalUsers,employee_related),
+           grepl(input$ZeroPriceMeetings,zero_price_res),
+           grepl(input$DiscountLevel,discount_level,ignore.case = TRUE),
+           grepl(input$memberProduct,member_product,ignore.case = TRUE)) %>% 
+#    mutate(resourceid=as.character(resourceid)) %>% 
+    inner_join(RiHana::get_hana_meeting_rooms(),by=c("resourceid"="resourceid"))
+
+  return(meet_data)
+})
+
+
+updatedMeetDataSummary <- reactive({
+  meet_data <-meet_bookings_edited %>% 
+    filter(meeting_date>=input$MeetTimeRange[1],
+           meeting_date<=input$MeetTimeRange[2],
+           grepl(input$hanaLocation,hana_location,ignore.case = TRUE),
+           grepl(input$roomType,room_size,ignore.case = TRUE),
+           grepl(input$meetingRoom,name),
+           grepl(input$FirstBooking,booking_number),
+           grepl(input$InternalUsers,employee_related),
+           grepl(input$ZeroPriceMeetings,zero_price_res),    
+           grepl(input$DiscountLevel,discount_level,ignore.case = TRUE),
+           grepl(input$memberProduct,member_product,ignore.case = TRUE)) %>% 
+    summarise(meetings=n(),
+              avgPrice=scales::dollar(mean(gross_price,na.rm=TRUE)),
+              avgProfit=scales::dollar(mean(gross_price+discount,na.rm = TRUE)),
+              avgDiscount=scales::percent(sum(discount,na.rm=TRUE)/sum(gross_price,na.rm=TRUE)))
+
+  return(meet_data)
+})
+
+
+updatedMeetHeatMap<-reactive({
+  
+
+  bookings_bin<-meet_bookings_edited %>%
+    filter(meeting_date>=input$MeetTimeRange[1],
+           meeting_date<=input$MeetTimeRange[2],
+           grepl(input$hanaLocation,hana_location,ignore.case = TRUE),
+           grepl(input$roomType,room_size,ignore.case = TRUE),
+           grepl(input$meetingRoom,name),
+           grepl(input$FirstBooking,booking_number),
+           grepl(input$InternalUsers,employee_related),
+           grepl(input$ZeroPriceMeetings,zero_price_res),
+           grepl(input$DiscountLevel,discount_level,ignore.case = TRUE),
+           grepl(input$memberProduct,member_product)) %>%
+    select(booking_id,meet_day,meet_start,meet_end) %>%
+    fuzzyjoin::fuzzy_inner_join(.,hour_blocks,by=c("meet_start"="Hours","meet_end"="Hours"),match_fun=list(`<=`,`>=`)) %>%
+    group_by(meet_day,Hours) %>%
+    summarise(events=n())
+
+    # bookings_bin_filter<-bookings_bin %>%
+    #        filter(meeting_date>=input$MeetTimeRange[1],
+    #         meeting_date<=input$MeetTimeRange[2],
+    #         grepl(input$hanaLocation,hana_location,ignore.case = TRUE),
+    #         grepl(input$roomType,resource_type,ignore.case = TRUE),
+    #         grepl(input$meetingRoom,resourcename),
+    #         grepl(input$FirstBooking,booking_number),
+    #         grepl(input$InternalUsers,employee_related),
+    #         grepl(input$ZeroPriceMeetings,zero_price_res),
+    #         grepl(input$memberProduct,member_product)) %>%
+    #   select(booking_id,meet_day,meet_start,meet_end,Hours) %>%
+    #   group_by(meet_day,Hours) %>%
+    #   summarise(events=n())
+
+    return(bookings_bin)
+  
+})
+
+updatedMeetUtilization <- reactive({
+  meet_data <-meet_bookings_edited %>% 
+    filter(meeting_date>=input$MeetTimeRange[1],
+           meeting_date<=input$MeetTimeRange[2],
+           grepl(input$hanaLocation,hana_location,ignore.case = TRUE),
+           grepl(input$roomType,room_size,ignore.case = TRUE),
+           grepl(input$meetingRoom,name),
+           grepl(input$FirstBooking,booking_number),
+           grepl(input$InternalUsers,employee_related),
+           grepl(input$ZeroPriceMeetings,zero_price_res),
+           grepl(input$DiscountLevel,discount_level,ignore.case = TRUE),
+           grepl(input$memberProduct,member_product)) %>% 
+    summarise(utilized_hours=as.numeric(sum(meeting_length),units="hours"))
+  
+  
+biz_days<-get_biz_days(input$MeetTimeRange[1],input$MeetTimeRange[2])
+
+meet_rooms<-RiHana::get_hana_meeting_rooms() %>% 
+  filter(grepl(input$hanaLocation,hana_unit,ignore.case = TRUE),
+           grepl(input$roomType,current_room_size,ignore.case = TRUE),
+           grepl(input$meetingRoom,room_name)) %>% 
+  summarise(rooms=n_distinct(room_name))
+
+utilization<-scales::percent(meet_data$utilized_hours/(meet_rooms$rooms*biz_days*10))
+
+return(utilization)
+
+})
+
+
+```
+
+Sidebar {.sidebar}
+=====================================
+###### **Data Updated:** _`r as_date(file.info('inc/Meet_data.RData')$mtime)` ._
+
+```{r}
+
+dateRangeInput('MeetTimeRange',
+      label = 'Choose the time range',
+      min= RiHana::get_relevant_date()$yoy_date,
+      max= RiHana::get_relevant_date()$yesterdays_date,
+      start = RiHana::get_relevant_date()$ytd_date, 
+      end = RiHana::get_relevant_date()$yesterdays_date,
+      weekstart = 1
+    )
+
+selectInput("hanaLocation", label = "Choose the location",
+           choices = c("All" = "*",
+                        "Park District" = "Park District",
+                        "Park Place" = "Park Place"),
+            selected= c("All"),
+            multiple = FALSE)
+
+selectInput("roomType", label = "Choose room type",
+            choices = c("All" ="*",
+                        "Large" = "Large",
+                        "Medium" = "Medium",
+                        "Small" = "Small"), 
+            selected = c("All"),
+            multiple = FALSE)
+
+selectInput("memberProduct", label = "Choose the user's product",
+           choices = c("All" = "*",
+                        "Team" = "Team",
+                        "Share" = "Share",
+                        "Meet" = "Meet",
+                        "Member" = "Team|Share"),
+            selected= c("All"),
+            multiple = FALSE)
+helpText("Note: 'Member' refers to users who are either Team or Share members")
+
+selectInput("DiscountLevel",label="Filter for level of discount",
+             choices=c("All"="*",
+                       "Full"="full",
+                       "Partial"="partial",
+                       "None"="none"),
+             selected="*",
+            multiple = FALSE)
+
+selectizeInput(
+        'meetingRoom', 'Choose a Room', choices = unique(meet_bookings_edited$name),
+        options = list(
+          placeholder = 'Please select an option below',
+          onInitialize = I('function() { this.setValue("*"); }')
+        )
+)
+
+radioButtons("ZeroPriceMeetings",label="Remove zero priced bookings",
+             choices=c("No"="*",
+                       "Yes"="^0$"),
+             selected="*",)
+helpText("Note: Zero Price meetings are meetings that have a $0 gross price")
+
+
+radioButtons("FirstBooking",label="Member First Booking",
+             choices=c("No"="*",
+                       "Yes"="^1$"),
+             selected="*")
+
+
+radioButtons("InternalUsers",label="Remove Internal Users",
+             choices=c("No"="*",
+                       "Yes"="^0$"),
+             selected="*")
+
+             
+```
+
+<strong>Booking Lead time</strong> - Time (in hours) from meeting creating until meeting start time
+
+<strong>Meeting Length</strong> - Length of reservation (in minutes)
+
+<strong>First Booking</strong> - Filter for only first reservations of members.
+
+<strong>Internal Users</strong> - Filter out Hana and CBRE users.
+
+Meet {data-orientation=rows}
+===================================== 
+
+
+Row{ width=8}
+-------------------------------------
+### Meet Bookings
+
+```{r}
+my_colors<-hana_color_palette(3)
+
+renderValueBox({
+  meetSummary<-updatedMeetDataSummary()
+valueBox(prettyNum(meetSummary$meetings,big.mark = ","), 
+         icon = "fa-calendar-o",
+         color = "#E6E2DA")
+})
+```
+
+### Average Gross Price
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  meetSummary<-updatedMeetDataSummary()
+valueBox(prettyNum(meetSummary$avgPrice,big.mark = ","), 
+         icon = "fa-file-invoice-dollar",
+         color = "#E6E2DA")
+})
+
+```
+
+### Average Net Price
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  meetSummary<-updatedMeetDataSummary()
+valueBox(prettyNum(meetSummary$avgProfit,big.mark = ","), 
+         icon = "fa-file-invoice-dollar",
+         color = "#E6E2DA")
+})
+```
+
+
+### Average Discount(%)
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  meetSummary<-updatedMeetDataSummary()
+valueBox(prettyNum(meetSummary$avgDiscount,big.mark = ","), 
+         icon = "fa-percentage",
+         color = "#E6E2DA")
+})
+```
+
+
+### Usage Rate
+
+```{r}
+my_colors<-hana_color_palette(3)
+renderValueBox({
+  meetUtilization<-updatedMeetUtilization()
+valueBox(prettyNum(meetUtilization,big.mark = ","), 
+         icon = "fa-cog",
+         color = "#E6E2DA")
+})
+```
+
+
+Row
+-------------------------------------
+
+### Meet Heatmap 
+
+```{r }
+
+# renderPlotly({
+# 
+#   bookings_bin<-updatedMeetHeatMap()
+#   plot_ly(bookings_bin,x = ~Hours, 
+#           y = ~meet_day,
+#           z = ~events, 
+#           colors = colorRamp(c("yellow", "red")), 
+#           type = "heatmap") %>% 
+#     layout(xaxis = list(title = 'Hour of day'),
+#          yaxis = list(title = 'Day of week'))
+# 
+#     
+# 
+# })   
+
+renderPlotly({
+  bookings_bin<-updatedMeetHeatMap()
+  p<-ggplot(bookings_bin, aes(x=Hours,y=meet_day))+
+  geom_tile(aes(fill=events))+
+  scale_fill_gradientn(colours=brewer.pal(9,"YlOrRd"),
+                       breaks=seq(0,max(bookings_bin$events),by=2))+
+  labs(x="Hour of Day", y="Day of Week")+
+  hana_fte_theme()+
+  theme(panel.background=element_rect(fill="white", color="white")) +
+  theme(plot.background=element_rect(fill="white", color="white")) +
+  theme(panel.border=element_rect(color="white")) +
+  coord_fixed()
+
+ggplotly(p)
+
+})
+
+```
+
+
+### Meet Resource Usage
+
+```{r }
+
+renderPlotly({
+  meet_data_detail<-updatedMeetData() %>%
+    group_by(room_size) %>%
+    summarise(bookings=n()) %>%
+    arrange(bookings) %>%
+    mutate(room_size=forcats::as_factor(as.character(room_size))) %>%
+    plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~room_size,
+          x = ~bookings,
+          bargroupgap=0.1,
+          bargap = 0.15,
+          type="bar")
+})
+
+```
+
+Row
+-------------------------------------
+
+### Meeting Length
+
+```{r }
+renderPlotly({
+  meet_data_detail<-updatedMeetData()
+  meet_data_detail%>%
+  arrange(meeting_length) %>%
+  mutate(meeting_length=forcats::as_factor(as.character(meeting_length))) %>%
+plot_ly(x = ~meeting_length,
+        marker = list(color = "#002D36"),
+#        color = ~hana_location,
+#        colors = hana_color_palette(n_distinct(meet_data_detail$hana_location),2),
+        type = "histogram") %>%
+    layout(legend = list(orientation = 'h'),
+           xaxis = list(title = 'Length of meeting (minutes)'),
+         yaxis = list(title = '# Meetings'))
+})
+
+
+```
+
+### Meet booking lead-time
+
+```{r }
+
+renderPlotly({
+
+meet_data_detail<-updatedMeetData()
+  
+density <- density(as.numeric(meet_data_detail$booking_lead_time))
+plot_ly(x = ~density$x, 
+        y = ~density$y, 
+        type = 'scatter', 
+        mode = 'lines', 
+        fill = 'tozeroy',
+        fillcolor = '#002D36',
+        line = list(width = 0.5)) %>%
+  layout(xaxis = list(title = 'Lead Time (hours)',
+                      showgrid=F),
+         yaxis = list(title = 'Relative Probability'))
+})
+
+```
+
+
+### Meet net price distribution
+
+```{r }
+
+renderPlotly({
+
+meet_data_detail<-updatedMeetData() %>% 
+  filter(!is.na(net_price))
+density <- density(as.numeric(meet_data_detail$net_price))
+plot_ly(x = ~density$x, 
+        y = ~density$y, 
+        fillcolor = '#002D36',
+        line = list(width = 0.5),
+        type = 'scatter', 
+        mode = 'lines', 
+        fill = 'tozeroy') %>%
+  layout(xaxis = list(title = 'Net Price',
+                      showgrid=F),
+         yaxis = list(title = 'Relative Probability'))
+})
+
+
+  
+
+
+```
+
+Meet Customers 
+===================================== 
+
+Column {data-width=700}
+-------------------------------------
+
+### Reservations by Customer
+
+```{r }
+
+renderPlotly({
+  meet_data_detail<-updatedMeetData() %>% 
+    group_by(company) %>% 
+    summarise(bookings=n()) %>% 
+    arrange(bookings) %>% 
+    mutate(company=forcats::as_factor(as.character(company))) %>%
+    plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~company,
+          x = ~bookings,
+          bargroupgap=0.1,
+          bargap = 0.15,
+          type="bar")
+})   
+
+
+
+```
+
+Column {data-width=300}
+-------------------------------------
+
+### Internal vs External Usage
+
+```{r }
+
+renderPlotly({
+meet_data_detail<-updatedMeetData() %>% 
+  group_by(internal_booking) %>% 
+  summarise(bookings=n())
+plot_ly(meet_data_detail, 
+        labels = ~internal_booking, 
+        values = ~bookings, 
+        type = 'pie',
+        marker = list(colors = hana_color_palette(n_distinct(meet_data_detail$bookings),2),
+                      line = list(color = '#FFFFFF', width = 1))) %>%
+  layout(xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+})
+
+```
+
+### Meetings by Member Type
+
+```{r }
+
+renderPlotly({
+meet_data_detail<-updatedMeetData() %>% 
+  group_by(member_product) %>% 
+  summarise(bookings=n())
+
+plot_ly(meet_data_detail, 
+        labels = ~member_product, 
+        values = ~bookings, 
+        type = 'pie',
+        marker = list(colors = hana_color_palette(n_distinct(meet_data_detail$member_product),2),
+                      line = list(color = '#FFFFFF', width = 1))) %>%
+  layout(xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+})
+
+```
+
+Meet Resources
+===================================== 
+
+Column {data-width=600}
+-------------------------------------
+
+### Reservations by Room
+
+```{r }
+
+renderPlotly({
+  meet_data_detail<-updatedMeetData() %>% 
+    group_by(name) %>% 
+    summarise(bookings=n()) %>% 
+    arrange(bookings) %>% 
+    mutate(name=forcats::as_factor(as.character(name))) %>%
+    plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~name,
+          x = ~bookings,
+          bargroupgap=0.1,
+          bargap = 0.15,
+          type="bar")
+})   
+
+
+
+```
+
+Column {data-width=200}
+-------------------------------------
+
+### Reservations Lead Time by Reservation Length
+
+```{r }
+
+renderPlotly({
+  meet_data_detail<-updatedMeetData() %>% 
+    filter(meeting_length<=1000,
+         booking_lead_time<=1000) 
+  
+  meet_data_detail %>% 
+    plot_ly(x = ~jitter(as.numeric(meeting_length)), 
+          y = ~booking_lead_time,
+          color = ~member_product, 
+          colors = hana_color_palette(n_distinct(meet_data_detail$hana_location),2))
+})
+```
+
+
+
+Column {data-width=200}
+-------------------------------------
+
+### Reservations by Room Capacity
+
+```{r }
+
+renderPlotly({
+  meet_data_detail<-updatedMeetData() %>% 
+    group_by(max_density) %>% 
+    summarise(bookings=n()) %>% 
+    arrange(bookings) %>% 
+#    mutate(max_density=forcats::as_factor(as.character(max_density))) %>%
+    plot_ly(marker = list(color = "#002D36"),
+          orientation='v',
+          y = ~bookings,
+          x = ~max_density,
+          bargroupgap=0.1,
+          bargap = 0.15,
+          type="bar")
+})
+
+```
+
+### Reservations by Seating Type
+
+```{r }
+
+renderPlotly({
+  meet_data_detail<-updatedMeetData() %>% 
+    group_by(seating_type) %>% 
+    summarise(bookings=n()) %>% 
+    arrange(bookings) %>% 
+    mutate(seating_type=forcats::as_factor(as.character(seating_type))) %>%
+    plot_ly(marker = list(color = "#002D36"),
+          orientation='h',
+          y = ~seating_type,
+          x = ~bookings,
+          bargroupgap=0.1,
+          bargap = 0.15,
+          type="bar")
+})
+
+```
+
+
+Meet Detail
+===================================== 
+
+```{r }
+
+
+DT::renderDataTable({
+datatable(updatedMeetData(), escape = FALSE,rownames = FALSE, extensions = c('Scroller', 'Buttons'), 
+          options = c(list(scrollY = 800, scroller = TRUE, scrollX=TRUE, deferRender=TRUE, dom = 'fBrtip',buttons = c('csv'))))
+})
+```
+

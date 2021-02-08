@@ -1,0 +1,251 @@
+---
+title: "Meet Usage"
+author: "Blake Abbenate"
+date: '`r Sys.Date()`'
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(plotly)
+library(RiHana)
+#get rid of scientific notation
+options(scipen=999)
+
+load("../Dashboards/raw_data/ELT_raw_data.RData")
+
+
+hour_blocks<-tibble::enframe(seq(0,23,by=.5),name=NULL,value="Hours")
+
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
+```{r}
+library(skimr)
+
+meet_bookings_edited<-meet_bookings %>% 
+  mutate(pos=as.double(pos)) %>% 
+  filter(is_deleted=='NO',
+         grepl('PD Prod|PPI',resourceresourcetypename),
+         coworkerid!='1122454558',
+         !name %in% c('Catering Reservation','Day Pass (PD Prod)')) %>% 
+  separate(email,c(NA,"email_domain"),sep="@") %>% 
+  arrange(createdon) %>% 
+  group_by(coworkerid) %>% 
+  mutate(time_between_bookings=coalesce(difftime(createdon,lag(createdon,1),units = 'mins'),99),
+         unique_booking=ifelse(time_between_bookings>5,1,0),
+         booking_number=row_number(),
+         internal_booking=ifelse(email_domain=='yourhana.com',1,0), 
+         employee_related=ifelse(grepl('cbre|hana',email_domain,ignore.case = TRUE),1,0),
+         zero_price_res=ifelse(gross_price==0,1,0),
+         hana_location=ifelse(grepl('PD Prod',resourceresourcetypename),'Park District','Park Place'),
+         company=coalesce(companyname,teamsatthetimeofbooking,email_domain),
+         fromtime_local=as.POSIXct(ifelse(hana_location=='Park District',fromtime-lubridate::hours(6),fromtime-lubridate::hours(8)),origin="1970-01-01",tz='UTC'),
+         totime_local=as.POSIXct(ifelse(hana_location=='Park District',totime-lubridate::hours(6),totime-lubridate::hours(8)),origin="1970-01-01",tz='UTC'),
+         meeting_date=as.Date(totime_local),
+         meet_start=ifelse(lubridate::minute(fromtime_local)>0,lubridate::hour(fromtime_local)+.5,lubridate::hour(fromtime_local)),
+         meet_end=ifelse(lubridate::minute(totime_local)>0,lubridate::hour(totime_local)+.5,lubridate::hour(totime_local)),
+         meet_day=lubridate::wday(fromtime_local,label=TRUE,week_start=1),
+         meeting_length=difftime(totime,fromtime,units="mins"),
+         booking_lead_time=difftime(totime,createdon,units="hours")) %>% 
+  select(-coworkerextraserviceprice,-companyname,-pos,-teamsatthetimeofbooking,-is_deleted) %>% 
+  ungroup(.)
+
+
+skim(meet_bookings)
+
+save(meet_bookings_edited,file="data/Meet_data.RData")
+
+```
+
+
+```{r}
+
+
+bookings_bin<-meet_bookings_edited %>% 
+  select(booking_id,meet_day,meet_start,meet_end) %>% 
+  fuzzyjoin::fuzzy_inner_join(.,hour_blocks,by=c("meet_start"="Hours","meet_end"="Hours"),match_fun=list(`<=`,`>=`)) %>% 
+  group_by(meet_day,Hours) %>% 
+  summarise(events=n())
+  
+library(RColorBrewer)  
+
+
+
+p<-ggplot(bookings_bin, aes(x=Hours,y=meet_day))+
+  geom_tile(aes(fill=events))+
+  scale_fill_gradientn(colours=brewer.pal(9,"YlOrRd"),
+                       breaks=seq(0,max(bookings_bin$events),by=2))+
+  labs(x="Hour of Day", y="Day of Week",title="Meet Usage Heatmap")+
+  hana_fte_theme()+
+  coord_fixed()
+
+ggplotly(p)
+
+```
+```{r}
+
+
+# one_plot <- function(d) {
+#   plot_ly(d, x = ~meeting_length) %>%
+#     add_annotations(
+#       ~unique(hana_location), x = 0.5, y = 1, 
+#       xref = "paper", yref = "paper", showarrow = FALSE
+#     )
+# }
+# 
+# meet_bookings_edited %>%
+#   split(.$hana_location) %>%
+#   lapply(one_plot) %>% 
+#   subplot(nrows = 2, shareX = TRUE, titleX = FALSE) %>%
+#   hide_legend()
+
+meet_bookings_edited %>% 
+  arrange(meeting_length) %>% 
+  mutate(meeting_length=as_factor(as.character(meeting_length))) %>% 
+plot_ly(x = ~meeting_length, 
+        color = ~hana_location,
+        colors = hana_color_palette(n_distinct(meet_bookings_edited$hana_location),2),
+        type = "histogram")
+
+```
+
+```{r}
+
+p<-meet_bookings_edited %>% ggplot(., aes(x = booking_lead_time, fill = hana_location)) + 
+  hana_fte_theme()+ 
+  geom_density(alpha = 0.5) +
+  scale_fill_manual(values=hana_color_palette(n_distinct(meet_bookings_edited$hana_location),2)) +
+  theme(legend.position="bottom")+
+  theme(legend.title=element_blank())
+
+
+ggplotly(p)
+
+```
+```{r}
+
+meet_bookings_edited %>% 
+  select(totime,fromtime,createdon,meeting_length,booking_lead_time)
+
+```
+```{r}
+library(lubridate)
+get_biz_days<-function(start_date,end_date){
+  
+df <- data.frame(date = seq(start_date, end_date, by = "days"))
+
+days <- df %>% 
+  mutate(day = wday(date,week_start=1)) %>%
+  filter(day<=5) %>%
+  nrow()
+
+days
+  
+}
+
+biz_days<-get_biz_days(as.Date("2020-01-01"),as.Date("2020-01-31"))
+
+my.bookings<-meet_bookings_edited %>% 
+  filter(meeting_date>=as.Date("2020-01-01"),
+         meeting_date<=as.Date("2020-01-31"),
+         hana_location=='Park District',
+         gross_price>0) %>% 
+  summarise(meet_rooms=n_distinct(name),
+              utilized_hours=as.numeric(sum(meeting_length[gross_price>0]),units="hours"))
+  
+  
+my.bookings$utilized_hours/(my.bookings$meet_rooms*biz_days*10)
+
+```
+```{r}
+
+meet_bookings_edited %>% 
+  group_by(invoiced,zero_price_res) %>% 
+  summarise(n())
+
+
+
+```
+```{r}
+
+RiHana::get_hana_meeting_rooms() %>% 
+  filter(grepl('Park Place',hana_location,ignore.case = TRUE),
+         grepl('*',room_type,ignore.case = TRUE),
+           grepl('*',room_name)) %>% 
+  summarise(rooms=n_distinct(room_name))
+
+
+
+```
+
+```{r}
+meet_bookings_edited %>% 
+  group_by(resourceid,name,resource_type) %>% 
+  summarise(n()) %>% write_csv("~/Downloads/room_type.csv")
+```
+```{r}
+meet_bookings_edited %>% 
+  mutate(resourceid=as.character(resourceid)) %>%
+```
+
+
+```{r}
+inner_join(RiHana::get_hana_meeting_rooms(),by=c("resourceid"="resourceid"))
+
+```
+
+
+```{r}
+
+zoom_meetings_edited %>% 
+  group_by(host) %>% 
+  summarise(meetings=n()) %>% 
+  arrange(desc(meetings))
+
+```
+
+```{r}
+
+kilby_meetings<-meet_bookings_edited %>% 
+  filter(name=='3-23 Kilby Conference Room')
+
+kilby_zoom<-zoom_meetings_edited %>% 
+  filter(host=='Kilby 3-23')
+
+km<-kilby_meetings %>% 
+  mutate(meeting_date=lubridate::as_date(fromtime)) %>% 
+  group_by(meeting_date) %>% 
+  summarise(meetings=n())
+
+kz<-kilby_zoom %>% 
+  mutate(meeting_date=lubridate::as_date(start_time)) %>% 
+  group_by(meeting_date) %>% 
+  summarise(meetings=n())
+
+kz %>% inner_join(km)
+
+```
+
+```{r}
+meet_bookings_edited %>% 
+  filter(meeting_length<=1000,
+         booking_lead_time<=1000) %>% 
+plot_ly(x = ~jitter(as.numeric(meeting_length)), y = ~booking_lead_time,color = ~member_product, colors = hana_color_palette(n_distinct(meet_bookings_edited$hana_location),2))
+
+
+```
+```{r}
+
+meet_bookings_edited %>% 
+    inner_join(RiHana::get_hana_meeting_rooms(),by=c("resourceid"="resourceid"))
+
+```
+
